@@ -1,8 +1,8 @@
-fastapi==0.95.2
-uvicorn==0.22.0
-sqlalchemy==1.4.49
-pydantic==1.10.13
-pydantic[email]
-mercadopago==2.0.7
-python-dotenv==1.0.1
-psycopg2-binary==2.9.9
+fastapi
+uvicorn
+SQLAlchemy
+psycopg2-binary
+pydantic==2.7.1
+pydantic-settings
+python-dotenv
+mercadopago
