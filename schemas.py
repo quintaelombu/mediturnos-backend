@@ -1,33 +1,42 @@
 from pydantic import BaseModel, EmailStr
 from datetime import datetime
 
-class MedicoBase(BaseModel):
-    nombre: str
-    especialidad: str
-    precio: float
-    duracion: int
-    activo: bool = True
 
-class MedicoCreate(MedicoBase):
+class DoctorBase(BaseModel):
+    nombre: str
+    apellido: str
+    especialidad: str
+    duracion_minutos: int
+    email: EmailStr | None = None
+
+
+class DoctorCreate(DoctorBase):
     pass
 
-class MedicoOut(MedicoBase):
+
+class DoctorOut(DoctorBase):
     id: int
 
-    model_config = {"from_attributes": True}
+    class Config:
+        orm_mode = True
 
 
 class TurnoBase(BaseModel):
     paciente_nombre: str
     paciente_email: EmailStr
+    doctor_id: int
     fecha_hora: datetime
 
+
 class TurnoCreate(TurnoBase):
-    medico_id: int
+    pass
+
 
 class TurnoOut(TurnoBase):
     id: int
-    medico_id: int
-    pagado: bool
+    estado: str
+    mp_payment_id: str | None
+    mp_status: str | None
 
-    model_config = {"from_attributes": True}
+    class Config:
+        orm_mode = True
