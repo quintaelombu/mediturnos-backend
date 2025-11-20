@@ -1,29 +1,32 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey
 from sqlalchemy.orm import relationship
 from database import Base
 from datetime import datetime
 
-class Medico(Base):
-    __tablename__ = "medicos"
+
+class Doctor(Base):
+    __tablename__ = "doctors"
 
     id = Column(Integer, primary_key=True, index=True)
     nombre = Column(String, nullable=False)
+    apellido = Column(String, nullable=False)
     especialidad = Column(String, nullable=False)
-    precio = Column(Float, nullable=False)
-    duracion = Column(Integer, nullable=False)  # minutos por turno
-    activo = Column(Boolean, default=True)
+    duracion_minutos = Column(Integer, default=15)
+    email = Column(String, nullable=True)
 
-    turnos = relationship("Turno", back_populates="medico")
+    turnos = relationship("Turno", back_populates="doctor")
 
 
 class Turno(Base):
     __tablename__ = "turnos"
 
     id = Column(Integer, primary_key=True, index=True)
-    medico_id = Column(Integer, ForeignKey("medicos.id"))
     paciente_nombre = Column(String, nullable=False)
     paciente_email = Column(String, nullable=False)
+    doctor_id = Column(Integer, ForeignKey("doctors.id"))
     fecha_hora = Column(DateTime, nullable=False)
-    pagado = Column(Boolean, default=False)
+    estado = Column(String, default="pendiente")
+    mp_payment_id = Column(String, nullable=True)
+    mp_status = Column(String, nullable=True)
 
-    medico = relationship("Medico", back_populates="turnos")
+    doctor = relationship("Doctor", back_populates="turnos")
