@@ -1,41 +1,37 @@
 import os
-from datetime import datetime, date, time
+from datetime import date, time, datetime, timedelta
 
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session
 
-from database import Base, engine, SessionLocal
+from database import SessionLocal, engine, Base
 from models import Doctor, Appointment
 
-import mercadopago
-
-# ─────────────────────────────
-# CONFIG
-# ─────────────────────────────
-
-# Mercado Pago
-MP_ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN", "")
-if not MP_ACCESS_TOKEN:
-    print("⚠️ MP_ACCESS_TOKEN NO configurado (sin pagos reales).")
-
-sdk = mercadopago.SDK(MP_ACCESS_TOKEN) if MP_ACCESS_TOKEN else None
-
-# FRONTEND_URL (para back_urls si querés luego)
-FRONTEND_URL = os.getenv("FRONTEND_URL", "")
-
-# Admin “secreto” simple para crear médicos (luego se mejora)
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "supersecreto")
-
-
-# ─────────────────────────────
-# DB
-# ─────────────────────────────
-
+# ─────────────────────────────────────
+# Inicializar BD (crear tablas)
+# ─────────────────────────────────────
 Base.metadata.create_all(bind=engine)
 
+# ─────────────────────────────────────
+# App FastAPI
+# ─────────────────────────────────────
+app = FastAPI(title="Mediturnos API")
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_URL] if FRONTEND_URL != "*" else ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─────────────────────────────────────
+# Dependencia de sesión de BD
+# ─────────────────────────────────────
 def get_db():
     db = SessionLocal()
     try:
@@ -43,259 +39,214 @@ def get_db():
     finally:
         db.close()
 
-
-# ─────────────────────────────
-# SCHEMAS (Pydantic)
-# ─────────────────────────────
+# ─────────────────────────────────────
+# Esquemas Pydantic (sólo para request)
+# ─────────────────────────────────────
+class TurnoCreate(BaseModel):
+    paciente_nombre: str
+    paciente_email: EmailStr
+    medico_id: int
+    fecha: str          # "2025-11-20"
+    hora: str           # "17:00"
+    motivo: str | None = None
 
 class DoctorCreate(BaseModel):
     nombre: str
     especialidad: str
-    email: EmailStr | None = None
-    precio: int      # ARS
-    duracion_min: int  # minutos
+    duracion_minutos: int = 30
+    precio_ars: int = 40000
 
-
-class DoctorOut(BaseModel):
-    id: int
-    nombre: str
-    especialidad: str
-    email: EmailStr | None
-    precio: int
-    duracion_min: int
-
-    class Config:
-        orm_mode = True
-
-
-class TurnoCreate(BaseModel):
-    paciente_nombre: str
-    paciente_email: EmailStr
-    motivo: str | None = None
-    fecha: str          # "2025-01-20"
-    hora: str           # "17:00"
-    doctor_id: int
-
-
-class TurnoOut(BaseModel):
-    id: int
-    paciente_nombre: str
-    paciente_email: EmailStr
-    motivo: str | None
-    fecha: date
-    hora: time
-    estado: str
-    doctor_id: int
-
-    class Config:
-        orm_mode = True
-
-
-# ─────────────────────────────
-# APP
-# ─────────────────────────────
-
-app = FastAPI(title="Mediturnos API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],   # después lo afinamos
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# ─────────────────────────────
-# RUTAS BÁSICAS
-# ─────────────────────────────
-
+# ─────────────────────────────────────
+# Rutas básicas
+# ─────────────────────────────────────
 @app.get("/")
 def root():
-    return {"status": "OK", "service": "Mediturnos backend"}
+    return {"status": "ok", "message": "Mediturnos backend activo"}
 
+# ─────────────────────────────────────
+# 1) Listar especialidades
+# ─────────────────────────────────────
+@app.get("/api/especialidades")
+def listar_especialidades(db: Session = Depends(get_db)):
+    filas = db.query(Doctor.especialidad).distinct().all()
+    # filas viene como lista de tuplas: [("Infectología",), ("Pediatría",)...]
+    return [f[0] for f in filas]
 
-# ─────────────────────────────
-# MÉDICOS (solo vos los podés crear)
-# ─────────────────────────────
+# ─────────────────────────────────────
+# 2) Listar médicos (opcionalmente filtrados por especialidad)
+# ─────────────────────────────────────
+@app.get("/api/medicos")
+def listar_medicos(especialidad: str | None = None,
+                   db: Session = Depends(get_db)):
+    q = db.query(Doctor)
+    if especialidad:
+        q = q.filter(Doctor.especialidad == especialidad)
+    medicos = q.order_by(Doctor.nombre).all()
 
-@app.post("/api/doctores", response_model=DoctorOut)
-def crear_doctor(
-    doctor: DoctorCreate,
-    admin_token: str,
-    db: Session = Depends(get_db),
-):
-    if admin_token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="No autorizado")
+    return [
+        {
+            "id": m.id,
+            "nombre": m.nombre,
+            "especialidad": m.especialidad,
+            "duracion_minutos": m.duracion_minutos,
+            "precio_ars": m.precio_ars,
+        }
+        for m in medicos
+    ]
 
-    nuevo = Doctor(
-        nombre=doctor.nombre,
-        especialidad=doctor.especialidad,
-        email=doctor.email,
-        precio=doctor.precio,
-        duracion_min=doctor.duracion_min,
-    )
-    db.add(nuevo)
-    db.commit()
-    db.refresh(nuevo)
-    return nuevo
-
-
-@app.get("/api/doctores", response_model=list[DoctorOut])
-def listar_doctores(db: Session = Depends(get_db)):
-    return db.query(Doctor).order_by(Doctor.nombre.asc()).all()
-
-
-# ─────────────────────────────
-# CREAR TURNO + PREFERENCIA MP
-# ─────────────────────────────
-
-@app.post("/api/turnos/crear-preferencia")
-def crear_preferencia(turno: TurnoCreate, db: Session = Depends(get_db)):
+# ─────────────────────────────────────
+# 3) Agenda de un médico en un día
+# ─────────────────────────────────────
+@app.get("/api/agenda")
+def agenda_medico(medico_id: int,
+                  fecha: str,
+                  db: Session = Depends(get_db)):
     """
-    1) Crea el turno en BD como 'pending'
-    2) Crea preferencia en MP (si hay MP_ACCESS_TOKEN)
-    3) Devuelve init_point para redirigir al checkout
+    Devuelve slots de ese día para ese médico.
+    Formato respuesta: [{ "hora": "09:00", "disponible": True }, ...]
     """
-    doctor = db.query(Doctor).filter(Doctor.id == turno.doctor_id).first()
-    if not doctor:
+
+    try:
+        dia = date.fromisoformat(fecha)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Fecha inválida")
+
+    medico = db.query(Doctor).get(medico_id)
+    if not medico:
         raise HTTPException(status_code=404, detail="Médico no encontrado")
 
-    # parsear fecha y hora
-    try:
-        f = date.fromisoformat(turno.fecha)
-        h = time.fromisoformat(turno.hora)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Formato de fecha u hora inválido")
+    # Por ahora horario fijo 09:00–20:00. Luego lo volvemos configurable.
+    inicio_jornada = time(9, 0)
+    fin_jornada = time(20, 0)
+    paso = timedelta(minutes=medico.duracion_minutos)
 
-    # crear turno pending
+    # Obtener turnos ya reservados de ese día
+    turnos = db.query(Appointment).filter(
+        Appointment.medico_id == medico_id,
+        Appointment.fecha == dia,
+        Appointment.estado != "cancelado"
+    ).all()
+
+    ocupados = {(t.hora_inicio.hour, t.hora_inicio.minute) for t in turnos}
+
+    slots = []
+    current_dt = datetime.combine(dia, inicio_jornada)
+    end_dt = datetime.combine(dia, fin_jornada)
+
+    while current_dt <= end_dt:
+        h = current_dt.time()
+        key = (h.hour, h.minute)
+        libre = key not in ocupados
+        slots.append({
+            "hora": h.strftime("%H:%M"),
+            "disponible": libre
+        })
+        current_dt += paso
+
+    return {
+        "medico_id": medico_id,
+        "fecha": fecha,
+        "duracion_minutos": medico.duracion_minutos,
+        "slots": slots,
+    }
+
+# ─────────────────────────────────────
+# 4) Crear turno (sin pago todavía)
+# ─────────────────────────────────────
+@app.post("/api/turnos")
+def crear_turno(body: TurnoCreate,
+                db: Session = Depends(get_db)):
+    # Parsear fecha y hora
+    try:
+        dia = date.fromisoformat(body.fecha)
+        hora = datetime.strptime(body.hora, "%H:%M").time()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Fecha u hora inválidas")
+
+    medico = db.query(Doctor).get(body.medico_id)
+    if not medico:
+        raise HTTPException(status_code=404, detail="Médico no encontrado")
+
+    # Verificar que el slot esté libre
+    existente = db.query(Appointment).filter(
+        Appointment.medico_id == body.medico_id,
+        Appointment.fecha == dia,
+        Appointment.hora_inicio == hora,
+        Appointment.estado != "cancelado"
+    ).first()
+
+    if existente:
+        raise HTTPException(status_code=409, detail="Ese horario ya está ocupado")
+
     nuevo = Appointment(
-        paciente_nombre=turno.paciente_nombre,
-        paciente_email=turno.paciente_email,
-        motivo=turno.motivo or "",
-        fecha=f,
-        hora=h,
-        estado="pending",
-        doctor_id=doctor.id,
+        paciente_nombre=body.paciente_nombre,
+        paciente_email=body.paciente_email,
+        medico_id=body.medico_id,
+        fecha=dia,
+        hora_inicio=hora,
+        duracion_minutos=medico.duracion_minutos,
+        motivo=body.motivo or "",
+        estado="reservado",
     )
+
     db.add(nuevo)
     db.commit()
     db.refresh(nuevo)
 
-    # si no tenemos MP configurado, devolvemos “falso pago”
-    if not sdk:
-        # modo pruebas sin Mercado Pago real
-        return {
-            "init_point": None,
-            "fake": True,
-            "message": "MP no configurado. Turno creado en estado 'pending'.",
-            "turno_id": nuevo.id,
-        }
-
-    # preferencia real
-    preference_data = {
-        "items": [
-            {
-                "id": str(nuevo.id),
-                "title": f"Consulta con {doctor.nombre} ({doctor.especialidad})",
-                "quantity": 1,
-                "currency_id": "ARS",
-                "unit_price": float(doctor.precio),
-            }
-        ],
-        "payer": {
-            "name": turno.paciente_nombre,
-            "email": turno.paciente_email,
-        },
-        "back_urls": {
-            "success": FRONTEND_URL or "",
-            "failure": FRONTEND_URL or "",
-            "pending": FRONTEND_URL or "",
-        },
-        "auto_return": "approved",
-        "metadata": {
-            "turno_id": nuevo.id,
-            "doctor_id": doctor.id,
-        },
-        # notification_url la configuramos cuando tengas dominio estable
+    # Por ahora sólo devolvemos datos del turno; luego le sumamos Mercado Pago
+    return {
+        "ok": True,
+        "turno_id": nuevo.id,
+        "medico_id": medico.id,
+        "fecha": body.fecha,
+        "hora": body.hora,
     }
 
-    try:
-        pref = sdk.preference().create(preference_data)
-        init_point = pref["response"].get("init_point")
-        preference_id = pref["response"].get("id")
-
-        nuevo.mp_preference_id = preference_id
-        db.commit()
-
-        return {
-            "init_point": init_point,
-            "turno_id": nuevo.id,
-        }
-    except Exception as e:
-        # si falla MP, dejamos el turno pending pero avisamos
-        raise HTTPException(status_code=500, detail=f"Error MP: {str(e)}")
-
-
-# ─────────────────────────────
-# LISTAR TURNOS (para panel médico)
-# ─────────────────────────────
-
-@app.get("/api/turnos", response_model=list[TurnoOut])
-def listar_turnos(
-    doctor_id: int | None = None,
-    fecha: str | None = None,
-    db: Session = Depends(get_db),
-):
+# ─────────────────────────────────────
+# 5) Endpoint sencillo para listar turnos (panel médico futuro)
+# ─────────────────────────────────────
+@app.get("/api/turnos")
+def listar_turnos(medico_id: int | None = None,
+                  db: Session = Depends(get_db)):
     q = db.query(Appointment)
+    if medico_id is not None:
+        q = q.filter(Appointment.medico_id == medico_id)
+    turnos = q.order_by(Appointment.fecha, Appointment.hora_inicio).all()
 
-    if doctor_id is not None:
-        q = q.filter(Appointment.doctor_id == doctor_id)
+    return [
+        {
+            "id": t.id,
+            "paciente_nombre": t.paciente_nombre,
+            "paciente_email": t.paciente_email,
+            "medico_id": t.medico_id,
+            "fecha": t.fecha.isoformat(),
+            "hora": t.hora_inicio.strftime("%H:%M"),
+            "estado": t.estado,
+            "motivo": t.motivo,
+        }
+        for t in turnos
+    ]
 
-    if fecha is not None:
-        try:
-            f = date.fromisoformat(fecha)
-            q = q.filter(Appointment.fecha == f)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Fecha inválida")
-
-    q = q.order_by(Appointment.fecha.asc(), Appointment.hora.asc())
-    return q.all()
-
-
-# ─────────────────────────────
-# WEBHOOK MP (cuando paguen)
-# ─────────────────────────────
-
-@app.post("/webhook/mp")
-async def webhook_mp(request: Request, db: Session = Depends(get_db)):
-    """
-    Cuando Mercado Pago notifica un pago, marcamos el turno como 'paid'.
-    Esto se termina de configurar cuando tengamos dominio público estable.
-    """
-    if not sdk:
-        return {"message": "MP no configurado"}
-
-    body = await request.json()
-
-    if body.get("type") != "payment":
-        return {"message": "ignored"}
-
-    payment_id = body.get("data", {}).get("id")
-    if not payment_id:
-        return {"message": "no payment id"}
-
-    payment = sdk.payment().get(payment_id)
-    p = payment.get("response", {})
-
-    if p.get("status") == "approved":
-        # recuperamos turno_id de metadata
-        turno_id = p.get("metadata", {}).get("turno_id")
-        if turno_id:
-            turno = db.query(Appointment).filter(Appointment.id == turno_id).first()
-            if turno:
-                turno.estado = "paid"
-                turno.mp_payment_id = str(payment_id)
-                db.commit()
-
-    return {"message": "ok"}
+# ─────────────────────────────────────
+# 6) Endpoint para crear médicos (por ahora sin auth)
+#    Más adelante lo protegemos con contraseña.
+# ─────────────────────────────────────
+@app.post("/api/medicos")
+def crear_medico(body: DoctorCreate,
+                 db: Session = Depends(get_db)):
+    medico = Doctor(
+        nombre=body.nombre,
+        especialidad=body.especialidad,
+        duracion_minutos=body.duracion_minutos,
+        precio_ars=body.precio_ars,
+    )
+    db.add(medico)
+    db.commit()
+    db.refresh(medico)
+    return {
+        "id": medico.id,
+        "nombre": medico.nombre,
+        "especialidad": medico.especialidad,
+        "duracion_minutos": medico.duracion_minutos,
+        "precio_ars": medico.precio_ars,
+    }
