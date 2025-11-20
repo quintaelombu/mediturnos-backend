@@ -1,109 +1,81 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
-from database import SessionLocal, engine, Base
+from database import Base, engine, get_db
 import models, schemas
-from fastapi.middleware.cors import CORSMiddleware
-from datetime import timedelta
 import os
+import mercadopago
 
-# Crear tablas
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(
-    title="Mediturnos Backend",
-)
+app = FastAPI()
 
-# CORS
-origins = [
-    "*",  # si querés lo limitamos luego al dominio del frontend
-]
+# Mercado Pago
+mp = mercadopago.SDK(os.getenv("MP_ACCESS_TOKEN"))
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 
 
-# Dependency DB
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# ---------------- MÉDICOS ------------------
 
-
-# -----------------------------
-# ENDPOINTS DOCTORES
-# -----------------------------
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "123456")
-
-
-@app.post("/admin/doctor", response_model=schemas.Doctor)
-def crear_doctor(
-    doctor: schemas.DoctorCreate,
-    token: str,
-    db: Session = Depends(get_db),
-):
+@app.post("/medicos/", response_model=schemas.MedicoOut)
+def crear_medico(medico: schemas.MedicoCreate, db: Session = Depends(get_db), token: str = ""):
     if token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Token inválido")
+        raise HTTPException(status_code=401, detail="No autorizado")
 
-    nuevo = models.Doctor(**doctor.dict())
-    db.add(nuevo)
+    db_med = models.Medico(**medico.model_dump())
+    db.add(db_med)
     db.commit()
-    db.refresh(nuevo)
-    return nuevo
+    db.refresh(db_med)
+    return db_med
 
 
-@app.get("/doctores", response_model=list[schemas.Doctor])
-def listar_doctores(db: Session = Depends(get_db)):
-    return db.query(models.Doctor).all()
+@app.get("/medicos/", response_model=list[schemas.MedicoOut])
+def listar_medicos(db: Session = Depends(get_db)):
+    return db.query(models.Medico).all()
 
 
-@app.get("/doctores/{doctor_id}", response_model=schemas.Doctor)
-def obtener_doctor(doctor_id: int, db: Session = Depends(get_db)):
-    doctor = db.query(models.Doctor).filter(models.Doctor.id == doctor_id).first()
-    if not doctor:
-        raise HTTPException(status_code=404, detail="No encontrado")
-    return doctor
+# ---------------- TURNOS ------------------
 
-
-# -----------------------------
-# ENDPOINTS TURNOS
-# -----------------------------
-
-@app.post("/turnos", response_model=schemas.Turno)
+@app.post("/turnos/", response_model=dict)
 def crear_turno(turno: schemas.TurnoCreate, db: Session = Depends(get_db)):
+    # validamos médico
+    medico = db.query(models.Medico).filter(models.Medico.id == turno.medico_id).first()
+    if not medico:
+        raise HTTPException(404, "Médico no encontrado")
 
-    # Verificar que no se superponga
-    solapa = (
-        db.query(models.Turno)
-        .filter(
-            models.Turno.doctor_id == turno.doctor_id,
-            models.Turno.inicio < turno.fin,
-            turno.inicio < models.Turno.fin,
-        )
-        .first()
-    )
-
-    if solapa:
-        raise HTTPException(status_code=400, detail="El turno está ocupado")
-
-    nuevo = models.Turno(**turno.dict())
-    db.add(nuevo)
+    # creamos turno en DB (sin pagar aún)
+    db_turno = models.Turno(**turno.model_dump())
+    db.add(db_turno)
     db.commit()
-    db.refresh(nuevo)
-    return nuevo
+    db.refresh(db_turno)
+
+    # creamos preferencia MP
+    preference = {
+        "items": [
+            {
+                "title": f"Consulta con {medico.nombre}",
+                "quantity": 1,
+                "unit_price": medico.precio
+            }
+        ],
+        "back_urls": {
+            "success": os.getenv("FRONTEND_URL") + "/success.html",
+            "failure": os.getenv("FRONTEND_URL") + "/error.html",
+            "pending": os.getenv("FRONTEND_URL") + "/pending.html"
+        },
+        "auto_return": "approved",
+        "metadata": {"turno_id": db_turno.id}
+    }
+
+    result = mp.preference().create(preference)
+    pay_url = result["response"]["init_point"]
+
+    return {"payment_url": pay_url, "turno_id": db_turno.id}
 
 
-@app.get("/turnos/{doctor_id}", response_model=list[schemas.Turno])
-def turnos_del_doctor(doctor_id: int, db: Session = Depends(get_db)):
-    return (
-        db.query(models.Turno)
-        .filter(models.Turno.doctor_id == doctor_id)
-        .order_by(models.Turno.inicio)
-        .all()
-    )
+@app.get("/turnos/{turno_id}", response_model=schemas.TurnoOut)
+def obtener_turno(turno_id: int, db: Session = Depends(get_db)):
+    turno = db.query(models.Turno).filter(models.Turno.id == turno_id).first()
+    if not turno:
+        raise HTTPException(404, "Turno no encontrado")
+    return turno
