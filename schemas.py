@@ -1,41 +1,28 @@
-from enum import Enum as PyEnum
-from pydantic import BaseModel, ConfigDict, EmailStr
+from pydantic import BaseModel, EmailStr
 
-
-class AppointmentStatus(str, PyEnum):
-    pending = "pending"
-    paid = "paid"
-    cancelled = "cancelled"
-
-
-# ───────────── DOCTORES ─────────────
-
-class DoctorBase(BaseModel):
+class MedicoBase(BaseModel):
     nombre: str
     especialidad: str
+    duracion_turno: int
     email: EmailStr
-    precio: int
-    duracion_minutos: int = 30
 
 
-class DoctorCreate(DoctorBase):
+class MedicoCreate(MedicoBase):
     pass
 
 
-class DoctorOut(DoctorBase):
+class MedicoOut(MedicoBase):
     id: int
-    model_config = ConfigDict(from_attributes=True)
+    class Config:
+        from_attributes = True
 
-
-# ───────────── TURNOS / APPOINTMENTS ─────────────
 
 class TurnoBase(BaseModel):
-    doctor_id: int
-    paciente_nombre: str
-    paciente_email: EmailStr
+    medico_id: int
     fecha: str
     hora: str
-    motivo: str | None = None
+    paciente_nombre: str
+    paciente_email: EmailStr
 
 
 class TurnoCreate(TurnoBase):
@@ -44,12 +31,8 @@ class TurnoCreate(TurnoBase):
 
 class TurnoOut(TurnoBase):
     id: int
-    status: AppointmentStatus
-    mp_preference_id: str | None = None
-    mp_payment_id: str | None = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
-class PreferenceResponse(BaseModel):
-    init_point: str
+    estado: str
+    preference_id: str | None = None
+    
+    class Config:
+        from_attributes = True
