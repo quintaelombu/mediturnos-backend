@@ -1,140 +1,110 @@
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from database import SessionLocal, engine
-import models
-import schemas
-import mercadopago
 import os
+import uuid
 
-# Crear tablas si no existen
-models.Base.metadata.create_all(bind=engine)
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, EmailStr
 
-app = FastAPI(title="Mediturnos Backend")
+import mercadopago
 
-# CORS
-origins = ["*"]
+# ─────────────────────────────────────────────
+# Configuración Mercado Pago
+# ─────────────────────────────────────────────
+MP_ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN", "")
+sdk = mercadopago.SDK(MP_ACCESS_TOKEN) if MP_ACCESS_TOKEN else None
+
+# ─────────────────────────────────────────────
+# App FastAPI
+# ─────────────────────────────────────────────
+app = FastAPI(
+    title="Mediturnos Backend",
+    version="1.0.0",
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],   # luego lo afinamos si querés
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Conexión DB por request
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+# ─────────────────────────────────────────────
+# Modelo de datos que viene del frontend
+# ─────────────────────────────────────────────
+class Turno(BaseModel):
+    nombre: str
+    email: EmailStr
+    especialidad: str
+    fecha: str   # "2025-03-10"
+    hora: str    # "15:30"
+    motivo: str
 
 
-# ================================
-#         MÉDICOS
-# ================================
-@app.post("/doctores", response_model=schemas.DoctorOut)
-def crear_doctor(data: schemas.DoctorCreate, db: Session = Depends(get_db)):
-
-    admin_token = os.getenv("ADMIN_TOKEN")
-
-    if data.admin_token != admin_token:
-        raise HTTPException(status_code=401, detail="Token inválido")
-
-    nuevo = models.Doctor(
-        nombre=data.nombre,
-        apellido=data.apellido,
-        especialidad=data.especialidad,
-        duracion_turno=data.duracion_turno,
-        precio=data.precio,
-    )
-
-    db.add(nuevo)
-    db.commit()
-    db.refresh(nuevo)
-
-    return nuevo
+# ─────────────────────────────────────────────
+# Endpoint raíz (para probar en el navegador)
+# ─────────────────────────────────────────────
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "service": "mediturnos-backend",
+        "version": "1.0.0",
+    }
 
 
-@app.get("/doctores", response_model=list[schemas.DoctorOut])
-def listar_doctores(db: Session = Depends(get_db)):
-    return db.query(models.Doctor).all()
+# ─────────────────────────────────────────────
+# Crear preferencia de pago en Mercado Pago
+# ─────────────────────────────────────────────
+@app.post("/api/crear-preferencia")
+def crear_preferencia(turno: Turno):
+    if sdk is None:
+        raise HTTPException(
+            status_code=500,
+            detail="MP_ACCESS_TOKEN no está configurado en el servidor."
+        )
 
-
-# ================================
-#         TURNOS
-# ================================
-@app.post("/turnos", response_model=schemas.TurnoOut)
-def crear_turno(data: schemas.TurnoCreate, db: Session = Depends(get_db)):
-
-    doctor = db.query(models.Doctor).filter(models.Doctor.id == data.doctor_id).first()
-
-    if not doctor:
-        raise HTTPException(status_code=404, detail="Doctor no encontrado")
-
-    turno = models.Turno(
-        doctor_id=data.doctor_id,
-        paciente_nombre=data.paciente_nombre,
-        paciente_email=data.paciente_email,
-        fecha=data.fecha,
-        hora=data.hora,
-        estado="pendiente",
-    )
-
-    db.add(turno)
-    db.commit()
-    db.refresh(turno)
-
-    return turno
-
-
-@app.get("/turnos/{doctor_id}")
-def obtener_turnos(doctor_id: int, db: Session = Depends(get_db)):
-    turnos = (
-        db.query(models.Turno)
-        .filter(models.Turno.doctor_id == doctor_id)
-        .order_by(models.Turno.fecha, models.Turno.hora)
-        .all()
-    )
-    return turnos
-
-
-# ================================
-#   MERCADO PAGO — PREFERENCIA
-# ================================
-@app.post("/mp/preferencia")
-def crear_preferencia(data: schemas.PagoCreate, db: Session = Depends(get_db)):
-
-    doctor = db.query(models.Doctor).filter(models.Doctor.id == data.doctor_id).first()
-
-    if not doctor:
-        raise HTTPException(status_code=404, detail="Doctor no encontrado")
-
-    ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN")
-
-    if not ACCESS_TOKEN:
-        raise HTTPException(status_code=500, detail="Falta MP_ACCESS_TOKEN")
-
-    sdk = mercadopago.SDK(ACCESS_TOKEN)
+    # Precios distintos por especialidad
+    precios = {
+        "Pediatría": 10000,
+        "Infectología pediátrica": 40000,
+        "Dermatología": 15000,
+    }
+    price = precios.get(turno.especialidad, 20000)
 
     preference_data = {
         "items": [
             {
-                "title": f"Consulta con Dr. {doctor.apellido}",
+                "id": str(uuid.uuid4()),
+                "title": f"Consulta {turno.especialidad}",
                 "quantity": 1,
-                "unit_price": float(doctor.precio),
+                "currency_id": "ARS",
+                "unit_price": float(price),
             }
         ],
-        "payer": {"email": data.paciente_email},
+        "payer": {
+            "name": turno.nombre,
+            "email": turno.email,
+        },
         "back_urls": {
-            "success": data.success_url,
-            "failure": data.failure_url,
-            "pending": data.pending_url,
+            "success": "https://mediturnos-frontend-production.up.railway.app/success.html",
+            "failure": "https://mediturnos-frontend-production.up.railway.app/error.html",
+            "pending": "https://mediturnos-frontend-production.up.railway.app/pending.html",
         },
         "auto_return": "approved",
     }
 
-    result = sdk.preference().create(preference_data)
-    return result["response"]
+    try:
+        pref = sdk.preference().create(preference_data)
+        init_point = pref["response"].get("init_point")
+
+        if not init_point:
+            raise HTTPException(
+                status_code=500,
+                detail="Mercado Pago no devolvió init_point."
+            )
+
+        return {"init_point": init_point}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error MP: {str(e)}")
