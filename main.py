@@ -1,88 +1,108 @@
 import os
 import uuid
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 import mercadopago
 
-# ─────────────────────────────────────────────
-# Configuración Mercado Pago
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────
+# VARIABLES DE ENTORNO
+# ─────────────────────────────────────────
+BACKEND_URL = os.getenv(
+    "BASE_URL",
+    "https://mediturnos-backend-production.up.railway.app"
+).rstrip("/")
+
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "https://mediturnos-frontend-production.up.railway.app"
+).rstrip("/")
+
 MP_ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN", "")
 
 if not MP_ACCESS_TOKEN:
-    raise RuntimeError("MP_ACCESS_TOKEN no está configurado en las variables de entorno.")
+    # No rompemos la app, pero avisamos en logs
+    print("⚠️ MP_ACCESS_TOKEN NO CONFIGURADO")
 
 sdk = mercadopago.SDK(MP_ACCESS_TOKEN)
 
-# ─────────────────────────────────────────────
-# App FastAPI
-# ─────────────────────────────────────────────
-app = FastAPI(
-    title="Mediturnos Backend",
-    version="1.0.0",
-)
+# ─────────────────────────────────────────
+# APP FASTAPI
+# ─────────────────────────────────────────
+app = FastAPI(title="Mediturnos Backend")
 
-# CORS (de momento, abierto)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # luego se puede restringir
+    allow_origins=["*"],  # si quieres, luego lo limitamos al FRONTEND_URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ─────────────────────────────────────────────
-# Esquema de datos que llega desde el frontend
-# ─────────────────────────────────────────────
-class TurnoIn(BaseModel):
+# ─────────────────────────────────────────
+# MODELOS
+# ─────────────────────────────────────────
+class Turno(BaseModel):
     nombre: str
     email: EmailStr
     especialidad: str
-    fecha: str   # "2025-03-10"
-    hora: str    # "17:30"
+    fecha: str
+    hora: str
     motivo: str
 
-class PreferenciaOut(BaseModel):
-    init_point: str
 
-# ─────────────────────────────────────────────
-# Rutas
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────
+# ENDPOINTS BÁSICOS
+# ─────────────────────────────────────────
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "mediturnos-backend"}
+    """Health check simple."""
+    return {"status": "OK", "service": "mediturnos-backend"}
 
-@app.post("/api/crear-preferencia", response_model=PreferenciaOut)
-def crear_preferencia(turno: TurnoIn):
-    """
-    Crea una preferencia de pago en Mercado Pago para el turno enviado
-    y devuelve la URL (init_point) donde el paciente paga.
-    """
 
-    # Precio fijo de prueba, luego lo cambiamos
-    precio = 100.0
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+
+# ─────────────────────────────────────────
+# CREAR PREFERENCIA DE MERCADO PAGO
+# ─────────────────────────────────────────
+@app.post("/api/crear-preferencia")
+def crear_preferencia(turno: Turno):
+    if not MP_ACCESS_TOKEN:
+        raise HTTPException(
+            status_code=500,
+            detail="MP_ACCESS_TOKEN no configurado en el backend",
+        )
+
+    # Precios de prueba por especialidad
+    precios = {
+        "Pediatría": 1000.0,
+        "Infectología pediátrica": 2000.0,
+    }
+    price = precios.get(turno.especialidad, 1500.0)
 
     preference_data = {
         "items": [
             {
                 "id": str(uuid.uuid4()),
-                "title": f"Consulta {turno.especialidad}",
+                "title": f"Consulta: {turno.especialidad}",
                 "quantity": 1,
                 "currency_id": "ARS",
-                "unit_price": precio,
+                "unit_price": float(price),
             }
         ],
         "payer": {
             "name": turno.nombre,
             "email": turno.email,
         },
-        "statement_descriptor": "MEDITURNOS",
+        # NO usamos webhook todavía, solo back_urls
         "back_urls": {
-            # Por ahora, URLs de prueba (luego las apuntamos a tu frontend)
-            "success": "https://example.com/success",
-            "failure": "https://example.com/failure",
-            "pending": "https://example.com/pending",
+            "success": f"{FRONTEND_URL}/success.html",
+            "failure": f"{FRONTEND_URL}/error.html",
+            "pending": f"{FRONTEND_URL}/pending.html",
         },
         "auto_return": "approved",
     }
@@ -92,11 +112,13 @@ def crear_preferencia(turno: TurnoIn):
         init_point = pref["response"].get("init_point")
 
         if not init_point:
-            raise HTTPException(status_code=500, detail="No se pudo obtener init_point de Mercado Pago.")
+            raise HTTPException(
+                status_code=500,
+                detail="No se pudo obtener init_point de Mercado Pago",
+            )
 
-        return PreferenciaOut(init_point=init_point)
+        return {"init_point": init_point}
 
     except Exception as e:
-        # Para debug rápido
-        print("Error Mercado Pago:", str(e))
-        raise HTTPException(status_code=500, detail=f"Error al crear preferencia: {str(e)}")
+        print("❌ Error creando preferencia:", str(e))
+        raise HTTPException(status_code=500, detail="Error con Mercado Pago")
