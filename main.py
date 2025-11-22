@@ -1,95 +1,66 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 from database import Base, engine, get_db
-import models, schemas
 import mercadopago
-import os
 
-# Crear tablas
-Base.metadata.create_all(bind=engine)
+from models import Doctor, Turno
+from schemas import DoctorCreate, Doctor, TurnoCreate, Turno
+import os
 
 app = FastAPI()
 
-mp_access_token = os.getenv("MP_ACCESS_TOKEN")
-mercado_pago = mercadopago.SDK(mp_access_token)
+Base.metadata.create_all(bind=engine)
 
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "SECRETO123")
+mp = mercadopago.SDK(os.getenv("MP_ACCESS_TOKEN"))
 
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "Mediturnos Backend activo"}
+    return {"status": "backend ok"}
 
 
-# ----------------------
-# ADMIN - CREAR MÉDICO
-# ----------------------
-
-@app.post("/medics", response_model=schemas.MedicOut)
-def create_medic(
-    medic: schemas.MedicCreate,
-    token: str,
-    db: Session = Depends(get_db)
-):
-    if token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Token inválido")
-
-    db_medic = models.Medic(**medic.dict())
-    db.add(db_medic)
+@app.post("/doctores", response_model=Doctor)
+def crear_doctor(data: DoctorCreate, db: Session = Depends(get_db)):
+    nuevo = Doctor(**data.dict())
+    db.add(nuevo)
     db.commit()
-    db.refresh(db_medic)
-    return db_medic
+    db.refresh(nuevo)
+    return nuevo
 
 
-# ----------------------
-# LISTAR MÉDICOS
-# ----------------------
-
-@app.get("/medics", response_model=list[schemas.MedicOut])
-def list_medics(db: Session = Depends(get_db)):
-    return db.query(models.Medic).all()
+@app.get("/doctores")
+def listar_doctores(db: Session = Depends(get_db)):
+    return db.query(Doctor).all()
 
 
-# ----------------------
-# GENERAR PREFERENCIA MP
-# ----------------------
+@app.post("/turnos", response_model=Turno)
+def crear_turno(data: TurnoCreate, db: Session = Depends(get_db)):
+    nuevo = Turno(**data.dict())
+    db.add(nuevo)
+    db.commit()
+    db.refresh(nuevo)
+    return nuevo
 
-@app.post("/pay/{medic_id}")
-def generate_payment(medic_id: int, db: Session = Depends(get_db)):
-    medic = db.query(models.Medic).filter(models.Medic.id == medic_id).first()
 
-    if not medic:
-        raise HTTPException(status_code=404, detail="Médico no encontrado")
-
+@app.post("/mp/preferencia")
+def crear_preferencia(data: TurnoCreate):
     preference_data = {
-        "items": [
-            {
-                "title": f"Consulta con {medic.name}",
-                "description": medic.specialty,
-                "quantity": 1,
-                "unit_price": medic.price,
-                "currency_id": "ARS"
-            }
-        ],
+        "items": [{
+            "title": f"Consulta médica con ID doctor {data.doctor_id}",
+            "quantity": 1,
+            "currency_id": "ARS",
+            "unit_price": 15000
+        }],
+        "payer": {
+            "name": data.paciente_nombre,
+            "email": data.paciente_email
+        },
         "back_urls": {
             "success": "https://mediturnos-frontend-production.up.railway.app/success",
-            "failure": "https://mediturnos-frontend-production.up.railway.app/error",
-            "pending": "https://mediturnos-frontend-production.up.railway.app/pending"
-        },
-        "auto_return": "approved",
+            "pending": "https://mediturnos-frontend-production.up.railway.app/pending",
+            "failure": "https://mediturnos-frontend-production.up.railway.app/error"
+        }
     }
 
-    pref = mercado_pago.preference().create(preference_data)
-    return {"init_point": pref["response"]["init_point"]}
-
-
-# ----------------------
-# RAILWAY START
-# ----------------------
-
-import uvicorn
-import os
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    res = mp.preference().create(preference_data)
+    return res
