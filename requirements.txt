@@ -1,8 +1,7 @@
 fastapi
 uvicorn
-sqlalchemy
+SQLAlchemy
+psycopg2-binary
 pydantic
-pydantic[email]
-psycopg[binary]
-mercadopago
 python-dotenv
+mercadopago
