@@ -1,131 +1,95 @@
-import os
-import uuid
-
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
+from database import Base, engine, get_db
+import models, schemas
 import mercadopago
+import os
 
-# ─────────────────────────────────────────
-# VARIABLES DE ENTORNO
-# ─────────────────────────────────────────
-BACKEND_URL = os.getenv(
-    "BASE_URL",
-    "https://mediturnos-backend-production.up.railway.app"
-).rstrip("/")
+# Crear tablas
+Base.metadata.create_all(bind=engine)
 
-FRONTEND_URL = os.getenv(
-    "FRONTEND_URL",
-    "https://mediturnos-frontend-production.up.railway.app"
-).rstrip("/")
+app = FastAPI()
 
-MP_ACCESS_TOKEN = os.getenv("MP_ACCESS_TOKEN", "")
+mp_access_token = os.getenv("MP_ACCESS_TOKEN")
+mercado_pago = mercadopago.SDK(mp_access_token)
 
-if not MP_ACCESS_TOKEN:
-    # No rompemos la app, pero avisamos en logs
-    print("⚠️ MP_ACCESS_TOKEN NO CONFIGURADO")
-
-sdk = mercadopago.SDK(MP_ACCESS_TOKEN)
-
-# ─────────────────────────────────────────
-# APP FASTAPI
-# ─────────────────────────────────────────
-app = FastAPI(title="Mediturnos Backend")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # si quieres, luego lo limitamos al FRONTEND_URL
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ─────────────────────────────────────────
-# MODELOS
-# ─────────────────────────────────────────
-class Turno(BaseModel):
-    nombre: str
-    email: EmailStr
-    especialidad: str
-    fecha: str
-    hora: str
-    motivo: str
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "SECRETO123")
 
 
-# ─────────────────────────────────────────
-# ENDPOINTS BÁSICOS
-# ─────────────────────────────────────────
 @app.get("/")
 def root():
-    """Health check simple."""
-    return {"status": "OK", "service": "mediturnos-backend"}
+    return {"status": "ok", "service": "Mediturnos Backend activo"}
 
 
-@app.get("/health")
-def health():
-    return {"ok": True}
+# ----------------------
+# ADMIN - CREAR MÉDICO
+# ----------------------
+
+@app.post("/medics", response_model=schemas.MedicOut)
+def create_medic(
+    medic: schemas.MedicCreate,
+    token: str,
+    db: Session = Depends(get_db)
+):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+    db_medic = models.Medic(**medic.dict())
+    db.add(db_medic)
+    db.commit()
+    db.refresh(db_medic)
+    return db_medic
 
 
-# ─────────────────────────────────────────
-# CREAR PREFERENCIA DE MERCADO PAGO
-# ─────────────────────────────────────────
-@app.post("/api/crear-preferencia")
-def crear_preferencia(turno: Turno):
-    if not MP_ACCESS_TOKEN:
-        raise HTTPException(
-            status_code=500,
-            detail="MP_ACCESS_TOKEN no configurado en el backend",
-        )
+# ----------------------
+# LISTAR MÉDICOS
+# ----------------------
 
-    # Precios de prueba por especialidad
-    precios = {
-        "Pediatría": 1000.0,
-        "Infectología pediátrica": 2000.0,
-    }
-    price = precios.get(turno.especialidad, 1500.0)
+@app.get("/medics", response_model=list[schemas.MedicOut])
+def list_medics(db: Session = Depends(get_db)):
+    return db.query(models.Medic).all()
+
+
+# ----------------------
+# GENERAR PREFERENCIA MP
+# ----------------------
+
+@app.post("/pay/{medic_id}")
+def generate_payment(medic_id: int, db: Session = Depends(get_db)):
+    medic = db.query(models.Medic).filter(models.Medic.id == medic_id).first()
+
+    if not medic:
+        raise HTTPException(status_code=404, detail="Médico no encontrado")
 
     preference_data = {
         "items": [
             {
-                "id": str(uuid.uuid4()),
-                "title": f"Consulta: {turno.especialidad}",
+                "title": f"Consulta con {medic.name}",
+                "description": medic.specialty,
                 "quantity": 1,
-                "currency_id": "ARS",
-                "unit_price": float(price),
+                "unit_price": medic.price,
+                "currency_id": "ARS"
             }
         ],
-        "payer": {
-            "name": turno.nombre,
-            "email": turno.email,
-        },
-        # NO usamos webhook todavía, solo back_urls
         "back_urls": {
-            "success": f"{FRONTEND_URL}/success.html",
-            "failure": f"{FRONTEND_URL}/error.html",
-            "pending": f"{FRONTEND_URL}/pending.html",
+            "success": "https://mediturnos-frontend-production.up.railway.app/success",
+            "failure": "https://mediturnos-frontend-production.up.railway.app/error",
+            "pending": "https://mediturnos-frontend-production.up.railway.app/pending"
         },
         "auto_return": "approved",
     }
 
-    try:
-        pref = sdk.preference().create(preference_data)
-        init_point = pref["response"].get("init_point")
+    pref = mercado_pago.preference().create(preference_data)
+    return {"init_point": pref["response"]["init_point"]}
 
-        if not init_point:
-            raise HTTPException(
-                status_code=500,
-                detail="No se pudo obtener init_point de Mercado Pago",
-            )
 
-        return {"init_point": init_point}
+# ----------------------
+# RAILWAY START
+# ----------------------
 
-    except Exception as e:
-        print("❌ Error creando preferencia:", str(e))
-        raise HTTPException(status_code=500, detail="Error con Mercado Pago")
-
-import os
 import uvicorn
+import os
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))   # Railway asigna PORT
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
