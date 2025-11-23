@@ -1,19 +1,18 @@
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 import os
+from fastapi import FastAPI, Depends
+from sqlalchemy.orm import Session
+from database import Base, engine, get_db
+import mercadopago
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+from models import Doctor, Turno
+from schemas import DoctorCreate, Doctor as DoctorSchema, TurnoCreate, Turno as TurnoSchema
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+app = FastAPI()
 
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base.metadata.create_all(bind=engine)
 
-Base = declarative_base()
+mp = mercadopago.SDK(os.getenv("MP_ACCESS_TOKEN"))
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+@app.get("/")
+def root():
+    return {"status": "backend ok"}
